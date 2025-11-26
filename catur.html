@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Gabut Doang</title>
+  <style>
+    :root{
+      --light:#f0d9b5;
+      --dark:#b58863;
+      --accent:#2b7a78;
+    }
+    html,body{height:100%;margin:0;font-family:Inter,system-ui,Arial;background:#f6f6f8;color:#222}
+    .wrap{display:flex;gap:24px;align-items:flex-start;justify-content:center;padding:24px}
+    .board{display:grid;grid-template-columns:repeat(8,64px);grid-template-rows:repeat(8,64px);box-shadow:0 6px 20px rgba(0,0,0,0.08);border-radius:8px;overflow:hidden}
+    .square{width:64px;height:64px;display:flex;align-items:center;justify-content:center;font-size:32px;cursor:pointer;user-select:none}
+    .square.light{background:var(--light)}
+    .square.dark{background:var(--dark)}
+    .square.highlight{outline:3px solid rgba(43,122,120,0.6)}
+    .square.last-move{box-shadow:inset 0 0 0 4px rgba(255,255,0,0.18)}
+    .info{max-width:360px}
+    h1{margin:0 0 8px;font-size:18px}
+    .meta{background:white;padding:12px;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,0.06)}
+    .controls{display:flex;gap:8px;margin-top:10px}
+    button{background:var(--accent);color:white;border:0;padding:8px 10px;border-radius:6px;cursor:pointer}
+    small{display:block;margin-top:8px;color:#666}
+    .turn{margin-top:10px;font-weight:600}
+    .log{margin-top:12px;max-height:240px;overflow:auto;padding:8px;background:#fff;border-radius:6px}
+    .log p{margin:4px 0}
+    .board-wrapper{display:flex;flex-direction:column;align-items:center}
+    .notation{display:grid;grid-template-columns:repeat(8,64px);gap:0;margin-top:8px}
+    .promo{display:flex;gap:8px;margin-top:8px}
+    .btn-ghost{background:transparent;color:var(--accent);border:1px solid rgba(43,122,120,0.12)}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="board-wrapper">
+      <div id="board" class="board" aria-label="Papan catur"></div>
+      <div class="notation" id="rankFiles"></div>
+    </div>
+    <div class="info">
+      <h1>Ini Catur</h1>
+      <div class="meta">
+        <div class="turn" id="turnText">Giliran: Putih</div>
+        <div class="controls">
+          <button id="undoBtn" class="btn-ghost">Undo</button>
+          <button id="resetBtn">Reset</button>
+        </div>
+        <small>Selamat bermain bujankkkkk</small>
+        <div class="log" id="log"></div>
+      </div>
+    </div>
+  </div>
+
+<script>
+// --- Simple chess implementation (no castling, no en-passant, promotion -> Queen) ---
+// Board coordinates: 0..7 for rows (0=8th rank) and cols (0=a)
+const initialFen = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w';
+
+let state = parseFen(initialFen);
+let selected = null;
+let legalMoves = [];
+let history = [];
+
+const boardEl = document.getElementById('board');
+const turnText = document.getElementById('turnText');
+const logEl = document.getElementById('log');
+
+const pieceToChar = {
+  'p':'♟','r':'♜','n':'♞','b':'♝','q':'♛','k':'♚',
+  'P':'♙','R':'♖','N':'♘','B':'♗','Q':'♕','K':'♔'
+}
+
+function parseFen(fen){
+  const [pos, turn] = fen.split(' ');
+  const rows = pos.split('/');
+  const board = Array.from({length:8},()=>Array(8).fill(null));
+  for(let r=0;r<8;r++){
+    let c=0;
+    for(const ch of rows[r]){
+      if (/[1-8]/.test(ch)){ c += Number(ch); }
+      else{ board[r][c++] = ch; }
+    }
+  }
+  return {board, turn: turn === 'w' ? 'w' : 'b'};
+}
+
+function render(){
+  boardEl.innerHTML='';
+  for(let r=0;r<8;r++){
+    for(let c=0;c<8;c++){
+      const sq = document.createElement('div');
+      sq.className = 'square ' + (((r+c)%2===0)?'light':'dark');
+      sq.dataset.r = r; sq.dataset.c = c;
+      const piece = state.board[r][c];
+      if(piece){
+        const span = document.createElement('div');
+        span.textContent = pieceToChar[piece] || '?';
+        span.style.pointerEvents='none';
+        sq.appendChild(span);
+      }
+      sq.addEventListener('click', onSquareClick);
+      boardEl.appendChild(sq);
+    }
+  }
+  turnText.textContent = 'Giliran: ' + (state.turn === 'w' ? 'Putih' : 'Hitam');
+  highlightMoves();
+}
+
+function onSquareClick(e){
+  const r = Number(e.currentTarget.dataset.r);
+  const c = Number(e.currentTarget.dataset.c);
+  const piece = state.board[r][c];
+  if(selected){
+    // if clicked one of legal moves
+    const found = legalMoves.find(m => m.to[0]===r && m.to[1]===c);
+    if(found){
+      makeMove(found);
+      selected = null; legalMoves = [];
+      render();
+      return;
+    }
+  }
+  // select own piece
+  if(piece && isPieceColor(piece, state.turn)){
+    selected = [r,c];
+    legalMoves = generateMovesFor(r,c, state);
+    render();
+  } else {
+    // clicked empty or opponent piece without selection
+    selected = null; legalMoves = [];
+    render();
+  }
+}
+
+function highlightMoves(){
+  const squares = boardEl.children;
+  for(const sq of squares){ sq.classList.remove('highlight','last-move'); }
+  if(selected){
+    const idx = selected[0]*8 + selected[1];
+    squares[idx].classList.add('highlight');
+    for(const m of legalMoves){
+      const toIdx = m.to[0]*8 + m.to[1];
+      squares[toIdx].classList.add('highlight');
+    }
+  }
+}
+
+function isInBounds(r,c){ return r>=0 && r<8 && c>=0 && c<8; }
+function isPieceColor(p,ch){ if(!p) return false; return (p === p.toUpperCase()) === (ch==='w'); }
+
+function generateMovesFor(r,c, st){
+  const piece = st.board[r][c];
+  if(!piece) return [];
+  const moves = [];
+  const color = (piece === piece.toUpperCase()) ? 'w' : 'b';
+  const forward = color==='w' ? -1 : 1;
+  const enemy = color==='w' ? 'b' : 'w';
+  const P = piece.toLowerCase();
+  if(P === 'p'){
+    // one step
+    if(isInBounds(r+forward,c) && !st.board[r+forward][c]) moves.push({from:[r,c],to:[r+forward,c]});
+    // two step
+    const startRow = color==='w'?6:1;
+    if(r===startRow && !st.board[r+forward][c] && !st.board[r+2*forward][c]) moves.push({from:[r,c],to:[r+2*forward,c]});
+    // captures
+    for(const dc of [-1,1]){
+      const rr=r+forward, cc=c+dc;
+      if(isInBounds(rr,cc) && st.board[rr][cc] && isPieceColor(st.board[rr][cc], enemy)) moves.push({from:[r,c],to:[rr,cc]});
+    }
+  }
+  if(P === 'n'){
+    const deltas=[[2,1],[2,-1],[-2,1],[-2,-1],[1,2],[1,-2],[-1,2],[-1,-2]];
+    for(const [dr,dc] of deltas){ const rr=r+dr, cc=c+dc; if(isInBounds(rr,cc) && (!st.board[rr][cc] || isPieceColor(st.board[rr][cc], enemy))) moves.push({from:[r,c],to:[rr,cc]}); }
+  }
+  if(P === 'b' || P==='r' || P==='q'){
+    const dirs = [];
+    if(P==='b' || P==='q') dirs.push(...[[1,1],[1,-1],[-1,1],[-1,-1]]);
+    if(P==='r' || P==='q') dirs.push(...[[1,0],[-1,0],[0,1],[0,-1]]);
+    for(const [dr,dc] of dirs){
+      let rr=r+dr, cc=c+dc;
+      while(isInBounds(rr,cc)){
+        if(!st.board[rr][cc]){ moves.push({from:[r,c],to:[rr,cc]}); }
+        else{ if(isPieceColor(st.board[rr][cc], enemy)) moves.push({from:[r,c],to:[rr,cc]}); break; }
+        rr+=dr; cc+=dc;
+      }
+    }
+  }
+  if(P === 'k'){
+    for(let dr=-1;dr<=1;dr++) for(let dc=-1;dc<=1;dc++){ if(dr===0 && dc===0) continue; const rr=r+dr, cc=c+dc; if(isInBounds(rr,cc) && (!st.board[rr][cc] || isPieceColor(st.board[rr][cc], enemy))) moves.push({from:[r,c],to:[rr,cc]}); }
+  }
+  // filter moves that leave king in check
+  const legal = moves.filter(m => !moveLeavesKingInCheck(st,m));
+  return legal;
+}
+
+function cloneState(s){ return {board: s.board.map(row => row.slice()), turn: s.turn}; }
+
+function moveLeavesKingInCheck(s, move){
+  const copy = cloneState(s);
+  const [fr,fc]=move.from; const [tr,tc]=move.to;
+  copy.board[tr][tc] = copy.board[fr][fc]; copy.board[fr][fc]=null;
+  // promotion
+  if(copy.board[tr][tc] && copy.board[tr][tc].toLowerCase()==='p'){
+    if(tr===0) copy.board[tr][tc] = 'Q';
+    if(tr===7) copy.board[tr][tc] = 'q';
+  }
+  const myColor = s.turn; // mover's color
+  return isKingInCheck(copy, myColor);
+}
+
+function isKingInCheck(s, color){
+  // find king
+  let kingR=-1, kingC=-1; const kingChar = color==='w' ? 'K' : 'k';
+  for(let r=0;r<8;r++) for(let c=0;c<8;c++) if(s.board[r][c]===kingChar){ kingR=r; kingC=c; }
+  if(kingR===-1) return true; // no king -> checkmate
+  // check enemy moves that attack king
+  const enemy = color==='w' ? 'b' : 'w';
+  for(let r=0;r<8;r++) for(let c=0;c<8;c++){
+    const p = s.board[r][c]; if(!p) continue; if(isPieceColor(p, color)) continue; // only enemy pieces
+    const moves = generatePseudoMovesFor(r,c,s);
+    if(moves.some(m => m[0]===kingR && m[1]===kingC)) return true;
+  }
+  return false;
+}
+
+// pseudo moves: like generateMovesFor but without check filtering (and returns [r,c] pairs)
+function generatePseudoMovesFor(r,c,s){
+  const piece = s.board[r][c]; if(!piece) return [];
+  const moves=[]; const color = (piece===piece.toUpperCase())?'w':'b'; const enemy = color==='w'?'b':'w'; const P=piece.toLowerCase(); const forward = color==='w' ? -1 : 1;
+  if(P==='p'){
+    if(isInBounds(r+forward,c) && !s.board[r+forward][c]) moves.push([r+forward,c]);
+    const startRow = color==='w'?6:1;
+    if(r===startRow && !s.board[r+forward][c] && !s.board[r+2*forward][c]) moves.push([r+2*forward,c]);
+    for(const dc of [-1,1]){const rr=r+forward, cc=c+dc; if(isInBounds(rr,cc) && s.board[rr][cc] && isPieceColor(s.board[rr][cc], color=== 'w' ? 'b' : 'w')) moves.push([rr,cc]); }
+  }
+  if(P==='n'){const deltas=[[2,1],[2,-1],[-2,1],[-2,-1],[1,2],[1,-2],[-1,2],[-1,-2]]; for(const [dr,dc] of deltas){const rr=r+dr, cc=c+dc; if(isInBounds(rr,cc) && (!s.board[rr][cc] || isPieceColor(s.board[rr][cc], color))) moves.push([rr,cc]);}}
+  if(P==='b' || P==='r' || P==='q'){const dirs=[]; if(P==='b' || P==='q') dirs.push(...[[1,1],[1,-1],[-1,1],[-1,-1]]); if(P==='r' || P==='q') dirs.push(...[[1,0],[-1,0],[0,1],[0,-1]]); for(const [dr,dc] of dirs){let rr=r+dr, cc=c+dc; while(isInBounds(rr,cc)){ if(!s.board[rr][cc]) moves.push([rr,cc]); else{ if(isPieceColor(s.board[rr][cc], color)) moves.push([rr,cc]); break; } rr+=dr; cc+=dc; }}}
+  if(P==='k'){for(let dr=-1;dr<=1;dr++) for(let dc=-1;dc<=1;dc++){ if(dr===0 && dc===0) continue; const rr=r+dr, cc=c+dc; if(isInBounds(rr,cc) && (!s.board[rr][cc] || isPieceColor(s.board[rr][cc], color))) moves.push([rr,cc]); }}
+  return moves;
+}
+
+function makeMove(move){
+  const copy = cloneState(state);
+  const [fr,fc]=move.from; const [tr,tc]=move.to;
+  const moved = copy.board[fr][fc];
+  const captured = copy.board[tr][tc];
+  copy.board[tr][tc] = moved; copy.board[fr][fc]=null;
+  // promotion
+  if(copy.board[tr][tc] && copy.board[tr][tc].toLowerCase()==='p'){
+    if(tr===0) copy.board[tr][tc] = 'Q';
+    if(tr===7) copy.board[tr][tc] = 'q';
+  }
+  copy.turn = copy.turn === 'w' ? 'b' : 'w';
+  history.push({state:state, move:move, captured:captured});
+  state = copy;
+  logMove(moved, move, captured);
+  // check for checkmate/stalemate
+  if(isCheckmate(state, state.turn)){
+    alert('Checkmate! ' + (state.turn==='w' ? 'Hitam menang' : 'Putih menang'));
+  } else if(isStalemate(state, state.turn)){
+    alert('Remis (stalemate)');
+  }
+}
+
+function logMove(moved, move, captured){
+  const from = coordToAlg(move.from); const to = coordToAlg(move.to);
+  const piece = moved.toUpperCase();
+  const text = (piece==='P' ? '' : piece) + from + (captured? 'x':'' ) + to;
+  const p = document.createElement('p'); p.textContent = text; logEl.appendChild(p); logEl.scrollTop = logEl.scrollHeight;
+}
+
+function coordToAlg([r,c]){ const file = String.fromCharCode('a'.charCodeAt(0)+c); const rank = 8-r; return file+rank; }
+
+function isCheckmate(s, color){
+  // if in check and no legal moves -> mate
+  if(!isKingInCheck(s,color)) return false;
+  for(let r=0;r<8;r++) for(let c=0;c<8;c++){
+    const p = s.board[r][c]; if(!p) continue; if(!isPieceColor(p,color)) continue;
+    const moves = generateMovesFor(r,c,s);
+    if(moves.length>0) return false;
+  }
+  return true;
+}
+function isStalemate(s, color){
+  if(isKingInCheck(s,color)) return false;
+  for(let r=0;r<8;r++) for(let c=0;c<8;c++){
+    const p = s.board[r][c]; if(!p) continue; if(!isPieceColor(p,color)) continue;
+    const moves = generateMovesFor(r,c,s);
+    if(moves.length>0) return false;
+  }
+  return true;
+}
+
+function generateAllLegalMoves(s){
+  const arr=[];
+  for(let r=0;r<8;r++) for(let c=0;c<8;c++){ if(s.board[r][c] && isPieceColor(s.board[r][c], s.turn)) arr.push(...generateMovesFor(r,c,s)); }
+  return arr;
+}
+
+function coordFromAlg(a){ const c = a.charCodeAt(0)-'a'.charCodeAt(0); const r = 8 - Number(a[1]); return [r,c]; }
+
+function undo(){ if(history.length===0) return; const last = history.pop(); state = last.state; render(); const p = logEl.lastChild; if(p) p.remove(); }
+
+// init
+function reset(){ state = parseFen(initialFen); history = []; selected = null; legalMoves = []; logEl.innerHTML=''; render(); }
+
+document.getElementById('undoBtn').addEventListener('click', ()=>{ undo(); });
+document.getElementById('resetBtn').addEventListener('click', ()=>{ reset(); });
+
+// helper to allow keyboard moves (basic)
+document.addEventListener('keydown', (e)=>{
+  if(e.key === 'u') undo();
+  if(e.key === 'r') reset();
+});
+
+reset();
+</script>
+</body>
+</html>
